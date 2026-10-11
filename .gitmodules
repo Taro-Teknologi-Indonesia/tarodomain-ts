@@ -1,0 +1,3 @@
+[submodule "packages/tarodomain-spec"]
+	path = packages/tarodomain-spec
+	url = https://github.com/Taro-Teknologi-Indonesia/tarodomain

@@ -1,0 +1,48 @@
+{
+  "name": "@tarodomain/core",
+  "version": "0.0.0",
+  "description": "TaroDomain core: DDD primitives, event sourcing, CQRS, sagas, projections, DI and the framework builder (platform-agnostic)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Taro-Teknologi-Indonesia/tarodomain-ts.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Taro-Teknologi-Indonesia/tarodomain-ts/tree/main/packages/core#readme",
+  "bugs": "https://github.com/Taro-Teknologi-Indonesia/tarodomain-ts/issues",
+  "keywords": [
+    "tarodomain",
+    "ddd",
+    "event-sourcing",
+    "cqrs",
+    "saga"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

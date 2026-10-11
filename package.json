@@ -1,0 +1,27 @@
+{
+  "name": "tarodomain-ts",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript implementation of the TaroDomain framework",
+  "license": "MIT",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "pnpm -r exec rm -rf dist *.tsbuildinfo",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "3.0.3",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
+}

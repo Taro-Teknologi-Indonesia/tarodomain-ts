@@ -1,0 +1,13 @@
+{
+  "name": "@tarodomain/example-bank-account",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference application: bank accounts, money transfer saga and balance projection",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tarodomain/core": "workspace:*"
+  }
+}
