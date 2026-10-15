@@ -1,6 +1,6 @@
 name: Release
 
-# Manual only until the packages are ready for their first real release (see IMPLEMENTATION_PLAN.md, Phase 9).
+# Manual only until the packages are ready for their first real release (see IMPLEMENTATION_PLAN.md, milestone M8).
 # Once ready, add a `push: branches: [main]` trigger so changesets opens "Version Packages" PRs automatically.
 on:
   workflow_dispatch:
