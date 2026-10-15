@@ -2,12 +2,12 @@
 
 Source of truth: [`packages/tarodomain-spec/README.md`](packages/tarodomain-spec/README.md), the TaroDomain Design Specification v1.0, pinned at commit `5abefed`. Section numbers (§) below refer to that document.
 
-This plan is organised around the spec's Layered Architecture (§1.2). Every module belongs to exactly one layer, the layers are built bottom-up, and a test stops imports from crossing layers in the wrong direction.
+This plan is organised around the spec's Layered Architecture (§1.2) and its dependency rules (§1.3). Every module belongs to exactly one layer, the layers are built in dependency order (the §1.3 diagram, bottom to top), and a test stops imports from crossing layers in the wrong direction.
 
 ## 1. Goals
 
 - Implement the full spec in TypeScript as a set of npm packages under the `@tarodomain` scope.
-- Make the §1.2 layers real in the code: one directory per layer, a one-way import rule, and a test that enforces it.
+- Make the §1.2 layers real in the code: one directory per layer, the §1.3 dependency rules as a one-way import rule, and a test that enforces it.
 - Keep the Domain layer pure. User domain code (aggregates, events, commands, value objects) never reaches persistence, buses or platforms (§1.1).
 - Keep the core platform-agnostic. Cloudflare lives in a separate provider package (§24).
 - Follow the spec's style: OOP with method-name conventions (`on[Event]`, `startsWhen[Event]`, …), no decorators (§1.1).
@@ -25,8 +25,8 @@ Each layer in the §1.2 diagram gets one directory in `packages/core/src/`. The 
 
 | Layer (§1.2) | Directory | Contents | Spec |
 |---|---|---|---|
-| Worker Entry Point | `entry/` | HTTP command router, queue and cron entry logic, template generators | §26 |
-| Framework (builder) | `framework/` | `TaroDomain.builder()`, `Framework`, DI container, startup validation | §15.3–15.4, §23, §25, §29.1 |
+| Worker Entry Point | `entry/` | Platform entry points (`CloudflareWorker`), template generators | §26 |
+| Framework (builder) | `framework/` | `TaroDomain.builder()`, `Framework` and its HTTP, queue and cron handlers, DI container, startup validation | §15.3–15.4, §23, §25, §26.1 (routes), §29.1 |
 | Command Pipeline + Event Bus | `dispatch/` | `EventBus` and `EventHandler` contracts, strong and eventual pipelines, `InMemoryEventBus`, queue consumer, cron catch-up, dead letters, saga timeouts, rebuild | §10.1–10.2, §10.4–10.5, §11, §14.1, §15.1–15.2, §16, §18, §19.1, §19.3, §20, §21.2–21.3, §29.2 |
 | Command / Projection / Saga Handlers | `handlers/` | `CommandHandler`, `Projection`, `ProcessManager`, `SagaEventHandler` | §4, §12, §13, §17, §19.2, §29.3 |
 | Domain Layer (pure) | `domain/` | `DomainEvent`, `Command`, `ValueObject`, `AggregateId`, `AggregateRoot`, `ExecutionContext` | §2, §5, §28.1 |
@@ -34,22 +34,22 @@ Each layer in the §1.2 diagram gets one directory in `packages/core/src/`. The 
 | Platform Layer (provider) | `platform/` | `Provider` interface, in-memory adapters, `LocalProvider` | §7.2, §10.3, §24, §27 |
 | Kernel (cross-cutting) | `kernel/` | Error hierarchy, UUIDv7, backoff, stable hashing, convention lookup, `Clock` and `Logger` | §22, §2.1, §16.2 |
 
-The Kernel is the column that runs alongside every other layer in the diagram. It holds the cross-cutting pieces every layer needs and imports nothing. `Clock`, `Logger`, stable hashing and convention lookup are additions in this implementation; the spec lists only the error hierarchy, UUIDv7 and backoff.
+The Kernel is the column alongside every other layer in the §1.2 diagram, and the bottom box of the §1.3 dependency diagram. It holds the cross-cutting pieces every layer needs and imports nothing. `Clock`, `Logger`, stable hashing and convention lookup are additions in this implementation; the spec lists only the error hierarchy, UUIDv7 and backoff.
 
 ```
 packages/core/src/        kernel/ domain/ persistence/ handlers/ dispatch/ platform/ framework/ entry/ testing/
-packages/cloudflare/src/  platform/ entry/
+packages/cloudflare/src/  platform/ framework/ entry/
 ```
 
 `testing/` holds the adapter conformance suites (§3.3). It sits outside the layer chain: it may import any layer, and nothing else in `src/` may import it.
 
 ### 2.2 Import rule
 
-The diagram shows the **call path**: a request enters at the top and reaches the database at the bottom. It can't also be the **import graph**. Read that way, the Domain layer would import Persistence and the Platform, and the spec requires domain code free of infrastructure (§1.1). The spec's dependency diagram (§1.3) sets out the rules. In this implementation they work out as follows:
+The §1.2 diagram shows the **call path**: a request enters at the top and reaches the database at the bottom. It can't also be the **import graph**. Read that way, the Domain layer would import Persistence and the Platform, and the spec requires domain code free of infrastructure (§1.1). The spec's dependency diagram (§1.3) sets out the rules. In this implementation they work out as follows:
 
 - Each contract **lives in the layer where the spec defines it**. Persistence has `EventStoreAdapter`, the other store contracts and `UnitOfWork`. Handlers have `CommandDispatcher`. Dispatch has `EventBus`, `EventHandler` and the `QueueMessage` port.
-- The **Platform layer implements** those contracts. It sits at the bottom of the call path but near the top of the import order, because it plugs implementations into contracts that other layers define.
-- Only the **Framework** picks a platform, through the `Provider` interface.
+- The **Platform layer implements** the Persistence contracts (including `UnitOfWork`) and `EventBus`. It sits at the bottom of the call path but near the top of the import order, because it plugs implementations into contracts that other layers define.
+- Only the **Framework** picks a platform, through the `Provider` interface. Provider packages add their own builder method (`.useCloudflare()`) in their `framework/` directory (D10).
 
 That gives one linear import order, the §1.3 diagram read bottom to top. A module may import from its own layer or from any layer to its left. As in §1.3, arrows point at the dependency:
 
@@ -57,12 +57,12 @@ That gives one linear import order, the §1.3 diagram read bottom to top. A modu
 kernel ◀─ domain ◀─ persistence ◀─ handlers ◀─ dispatch ◀─ platform ◀─ framework ◀─ entry
 ```
 
-One exception keeps the Event Bus contracts in the Event Bus layer, where §1.2 and §10 put them. Two layers to its left need them. `Repository.save()` publishes right after appending (§6.2 step 4), and `CommandHandler` receives the bus (§4.1). Projections and saga handlers implement `EventHandler` (§12.1, §13.3). So a module may also import another layer's **contract module** (`contracts.ts`), wherever that layer sits, provided that:
+One exception keeps the Event Bus contracts in the Event Bus layer, where §1.2 and §10 put them. These are the dashed arrows in §1.3: two layers to the left of Dispatch need the contracts. `Repository.save()` publishes right after appending (§6.2 step 4), and `CommandHandler` receives the bus (§4.1). Projections and saga handlers implement `EventHandler` (§12.1, §13.3). So **Persistence and Handlers** may also import from `dispatch/bus/contracts.ts` (`EventBus`, `EventHandler`), provided that:
 
 - the import is type-only (`import type`), so it is erased at runtime and can't create a load cycle;
-- the contract module holds only interfaces and types, and imports only from Kernel, Domain and other contract modules.
+- `contracts.ts` holds only interfaces and types, and imports only from Domain and Kernel.
 
-Today only `dispatch/bus/contracts.ts` (`EventBus`, `EventHandler`) needs this.
+No other layer gets this exception. In particular, Domain still depends only on the Kernel.
 
 `UnitOfWork` (§11.4) lives in Persistence, as the transaction boundary over the stores. The pipelines call it and the Platform implements it. Both sit to the right of Persistence, so it needs no exception.
 
@@ -70,22 +70,33 @@ Today only `dispatch/bus/contracts.ts` (`EventBus`, `EventHandler`) needs this.
 
 ### 2.3 Enforcement
 
-`packages/core/test/architecture.test.ts` scans every file under `src/` and resolves its relative imports to a layer directory. It fails when:
+Two architecture tests enforce the rules: `packages/core/test/architecture.test.ts` and `packages/cloudflare/test/architecture.test.ts`. Both use [`tools/architecture.ts`](tools/architecture.ts), which needs no extra dependency. TypeScript 7 has no JavaScript parser API, so it scans source text and ignores comments and template literals. Each test also runs the checker on deliberate violations, so a rule that stops working fails the build.
 
-- a module imports from a layer to its right, unless it is a type-only import from a contract module;
-- a contract module contains runtime code, or imports anything other than Kernel, Domain and other contract modules;
-- anything other than a test imports `testing/`;
-- a module outside `platform/node/` imports a `node:*` built-in, so core keeps running unchanged on Workers;
-- a module inside `src/` imports a layer's `index.ts` barrel. Barrels are for the public API only, and internal barrel imports create cycles.
+**Core** fails when:
 
-It needs no extra dependency. The Cloudflare package gets a smaller version: its `platform/` must not import its `entry/`.
+- a module imports from a layer to its right. The only exception is a type-only import of `dispatch/bus/contracts.ts` from Persistence or Handlers;
+- `dispatch/bus/contracts.ts` contains runtime code, or imports anything other than Domain and Kernel (type-only);
+- a file sits outside a layer directory or `testing/`;
+- anything outside `testing/` imports `testing/` or vitest;
+- a module outside `platform/node/` imports a `node:*` built-in or anything in `platform/node/`, so the main entry runs unchanged on Workers;
+- a module imports any other package, since core has no runtime dependencies;
+- a module inside `src/` imports an `index.ts` barrel. Barrels are for the public API only, and internal barrel imports create cycles;
+- `src/index.ts` contains anything other than `export * from './<layer>/index.js'`, or `framework/index.ts` or `entry/index.ts` uses `export *`. These keep every public name traceable to one layer, which the Cloudflare check relies on.
+
+**Cloudflare** fails when:
+
+- its directories break `platform ◀─ framework ◀─ entry`;
+- `platform/` imports a name exported by core's Framework or Entry layer, or `framework/` imports an Entry name. The names are read from those two barrels. This stops an adapter from taking the builder or the DI container;
+- it imports `@tarodomain/core` as a namespace (`import * as`), which hides the names used, or uses an unknown or test-only export path.
+
+[`CLAUDE.md`](CLAUDE.md) states the same rules for LLM-assisted work. It also forbids weakening the checks to make a change pass.
 
 ### 2.4 Packages and entry points
 
 | Package | Layers |
 |---|---|
-| `@tarodomain/core` | All layers. Platform holds only the local provider; Entry holds only platform-neutral logic. |
-| `@tarodomain/cloudflare` | Platform (D1, Queues, `CloudflareProvider`) and Entry (`CloudflareWorker`, `.useCloudflare()`, templates) |
+| `@tarodomain/core` | All layers. Platform holds only the local provider; Entry holds only the platform-neutral templates. |
+| `@tarodomain/cloudflare` | Platform (D1, Queues, `CloudflareProvider`), Framework (`.useCloudflare()`) and Entry (`CloudflareWorker`, templates) |
 
 `@tarodomain/core` has four export paths:
 
@@ -158,7 +169,7 @@ The contracts every store must satisfy, and the framework-provided wrappers on t
 
 ### 3.4 Handlers — `handlers/`
 
-Application logic that reacts to commands and events. There are three sub-modules, matching the diagram's three columns.
+Application logic that reacts to commands and events. There are three sub-modules, matching the three columns in the §1.2 diagram.
 
 | Sub-module | Components | Spec |
 |---|---|---|
@@ -196,7 +207,7 @@ In strong mode, the idempotency mark is written inside the unit of work, so a ro
 
 **Tests:** an optimistic-concurrency retry reloads the aggregate and re-executes the command; a failing handler rolls back the events, projection rows and saga state together; duplicate command IDs are skipped; G1 and G3; catch-up and rebuild produce the same read model as live dispatch; backpressure stops at its time and event budgets; timed-out sagas compensate or fail.
 
-**Walking skeleton.** Building bottom-up means the builder doesn't exist until M6. To get end-to-end feedback earlier, M4 ends with one test that wires a pipeline, a repository and the in-memory stores by hand and runs `OpenAccount` → `AccountOpened` → projection row.
+**Walking skeleton.** Building in dependency order means the builder doesn't exist until M6. To get end-to-end feedback earlier, M4 ends with one test that wires a pipeline, a repository and the in-memory stores by hand and runs `OpenAccount` → `AccountOpened` → projection row.
 
 ### 3.6 Platform — `platform/` and the Cloudflare package
 
@@ -231,30 +242,31 @@ Assembles the layers into a running application.
 | `TaroDomain.builder()` | `.useProvider()`, `.useLocal()`, `.consistency()`, `.snapshotEvery()`, `.aggregate()`, `.command()`, `.projection()`, `.saga()`, `.events()`, `.validation()`, `.skipValidation()`, `.build()` | §25.1 |
 | Assembly | Two event buses, two repositories per aggregate and two pipelines. Repository mode (`event_sourced` or `state`) is set per aggregate. | §11.3, §15.3, §15.4 |
 | `Framework` | `dispatch`, `fetchHandler`, `queueHandler`, `scheduledHandler`, `getConsistencyFor`, service accessors | §25.2 |
+| Runtime handlers | `fetchHandler()`: the HTTP router (D11), with errors turned into responses by `FrameworkError.toHttpResponse()`. `queueHandler()`: runs over `QueueMessage`. `scheduledHandler()`: cron catch-up, then saga timeouts, within the backpressure budget. | §25.2, §26.1 |
 | `FrameworkValidator` | Runs inside `build()`. Errors throw one `InvalidConfigurationError` that lists every issue; warnings go to the `Logger`. | §29.1 |
 
-**Decisions:** D4, D10.
+The runtime handlers live here, not in Entry, because `Framework` exposes them (§25.2) and Entry depends on Framework, never the reverse (§1.3). Entry only adapts a platform's triggers to them.
 
-**Tests:** the validator rejects each misconfiguration listed in §29.1; per-command consistency overrides route to the right pipeline; DI lifetimes and cycle detection.
+`@tarodomain/cloudflare` adds `.useCloudflare()` to the builder from its own `framework/` directory (D10), because choosing a platform is the Framework's job (§1.3).
+
+**Decisions:** D4, D10, D11.
+
+**Tests:** the validator rejects each misconfiguration listed in §29.1; per-command consistency overrides route to the right pipeline; DI lifetimes and cycle detection; end to end through `fetchHandler()` in `examples/bank-account`.
 
 ### 3.8 Worker Entry Point — `entry/` and the Cloudflare package
 
-Turns platform triggers into framework calls.
+Adapts each platform's triggers to the Framework's runtime handlers (section 3.7). Depends on the Framework, never the reverse.
 
 **Platform-neutral (in core)**
 
-- The HTTP router behind `fetchHandler()` (D11). Errors become responses through `FrameworkError.toHttpResponse()`.
-- Queue entry over `QueueMessage`.
-- The scheduled job: cron catch-up, then saga timeouts, within the backpressure budget.
 - `generatePackageJson`, `generateTsConfig` (§26.3).
 
 **Cloudflare**
 
-- `CloudflareWorker`, whose `export` returns `{ fetch, queue, scheduled }` and adapts `MessageBatch` to `QueueMessage` (§26.1).
-- `.useCloudflare()` (D10).
+- `CloudflareWorker`, whose `export` returns `{ fetch, queue, scheduled }`. It calls the Framework's handlers and adapts `MessageBatch` to `QueueMessage` (§26.1).
 - `generateCloudflareWorkerTs`, `generateWranglerToml`.
 
-**Tests:** end to end through `fetchHandler()` in `examples/bank-account`; snapshot tests of the template output.
+**Tests:** `CloudflareWorker` acks and retries queue messages correctly; snapshot tests of the template output.
 
 ## 4. Saga guarantees (decided)
 
@@ -262,7 +274,7 @@ The spec leaves these gaps open. They are hard requirements, and each gets a ded
 
 **G1 — No event is ever skipped because of re-entrancy** (§13.3 step 6, §11.1).
 In strong mode, commands dispatched by a saga run synchronously. Their events reach the same saga *before* its state has been saved. `SagaEventHandler` queues those re-entrant events per saga instance, saves the current event's state, then processes the queue, all inside the same transaction. During that cycle it holds the saga's latest state in an in-memory, write-through cache. This is required on D1, where writes deferred by the unit of work can't be read before commit.
-*Layers:* Handlers (`SagaEventHandler`), Dispatch (strong pipeline), Platform (unit of work).
+*Layers:* Handlers (`SagaEventHandler`), Dispatch (strong pipeline), Persistence (`UnitOfWork` contract), Platform (its implementations).
 *Test (M4, repeated on D1 in M7):* a three-step saga completes within a single strong-mode `dispatch()`.
 
 **G2 — Compensations are never lost** (§13.5, §17).
@@ -287,11 +299,10 @@ In strong mode, a failure rolls back everything in one transaction, which is a f
 Milestones follow the import order, left to right. Each ends with green `pnpm typecheck && pnpm test` and a check-in with you before the next one starts. The Platform layer is delivered in slices: local stores in M2 (the layers above need them for tests), the local provider in M6, then Cloudflare in M7.
 
 ### M0 — Scaffolding ✅
-pnpm 10 workspaces, TypeScript 7 (strict, `NodeNext`, ESM only), vitest 5, the `source` export condition, the spec submodule, npm publish metadata, Changesets, CI (typecheck, test and build on Node 22 and 24), a manual-only release workflow, and placeholder READMEs.
+pnpm 10 workspaces, TypeScript 7 (strict, `NodeNext`, ESM only), vitest 5, the `source` export condition, the spec submodule, npm publish metadata, Changesets, CI (typecheck, test and build on Node 22 and 24), a manual-only release workflow, and placeholder READMEs. Also the layer guardrails from section 2.3: both architecture tests, `tools/architecture.ts` and `CLAUDE.md`.
 
 ### M1 — Kernel and Domain
 - Everything in sections 3.1 and 3.2.
-- The architecture test (section 2.3), in place from the first layer onward.
 - The `./domain` export.
 
 **Exit:** unit tests for every primitive. The architecture test passes.
@@ -327,7 +338,7 @@ pnpm 10 workspaces, TypeScript 7 (strict, `NodeNext`, ESM only), vitest 5, the `
 **Exit:** the example's end-to-end tests pass using only `@tarodomain/core`.
 
 ### M7 — Cloudflare (`@tarodomain/cloudflare`)
-- The Cloudflare parts of sections 3.6 and 3.8.
+- The Cloudflare parts of sections 3.6, 3.7 and 3.8.
 
 **Exit:** the D1 adapters pass the conformance suites on the `node:sqlite` shim, G1 passes on D1, and the example runs on `CloudflareProvider` over the shim.
 
@@ -350,8 +361,8 @@ Each item has a recommendation and the milestone that needs it settled. They are
 | D7 | Dispatch | **Eventual-mode crash window** (§11.2, §14.1) | The event append and the idempotency mark are separate writes. A crash between them lets a retry re-run the command against the new state, for example depositing twice. | For v0.1, document it. After v0.1, evaluate writing the mark in the same atomic write as the append (the same D1 batch), which needs an optional extra-writes parameter on `appendToStream`. | M4 |
 | D8 | Platform | **Eventual mode under `LocalProvider`** (§24.2) | The spec lists `InMemoryEventBus`, but a plain bus with no subscribers would never deliver events to projections. | An in-memory queue drained by the framework's own `queueHandler()`: automatic by default, manual `drain()` in tests. | M6 |
 | D9 | Platform | **D1 strong-mode reads inside a transaction** (§11.4) | `TransactionalDatabase` defers writes, so reads in the same transaction don't see them. Example: a saga touching the same aggregate twice in one synchronous chain. | Document it as a limitation. G1 removes the saga case. Two writes to one aggregate in one strong chain fail on commit with a concurrency error. | M7 |
-| D10 | Framework, Entry | **`.useCloudflare()` on the builder** (§25.1) | `@tarodomain/core` can't import the provider packages. | Core keeps `.useProvider(p)` and `.useLocal()`. `@tarodomain/cloudflare` registers `.useCloudflare()` through TypeScript module augmentation when imported. A future AWS package would add `.useAws()` the same way. | M7 |
-| D11 | Entry | **HTTP wire format** (§26.1) | Not specified. `POST /migrate` is also unauthenticated in the spec. | `POST /commands/{CommandType}` with the business fields as a JSON body. `x-request-id` becomes the correlation ID and `x-command-id` the idempotency key. `POST /migrate` stays disabled unless the app configures a migration secret, sent as a bearer token. | M6 |
+| D10 | Framework | **`.useCloudflare()` on the builder** (§25.1) | `@tarodomain/core` can't import the provider packages. | Core keeps `.useProvider(p)` and `.useLocal()`. `@tarodomain/cloudflare` registers `.useCloudflare()` from its `framework/` directory through TypeScript module augmentation when imported. A future AWS package would add `.useAws()` the same way. | M7 |
+| D11 | Framework | **HTTP wire format** (§26.1) | Not specified. `POST /migrate` is also unauthenticated in the spec. | `POST /commands/{CommandType}` with the business fields as a JSON body. `x-request-id` becomes the correlation ID and `x-command-id` the idempotency key. `POST /migrate` stays disabled unless the app configures a migration secret, sent as a bearer token. | M6 |
 | D12 | Release | **npm scope** | Is `@tarodomain` available, and owned by you? The packages publish under it. | Create the `tarodomain` npm organization, or pick another scope, before M8. | M8 |
 
 ## 7. Testing and conventions
@@ -359,7 +370,7 @@ Each item has a recommendation and the milestone that needs it settled. They are
 **Testing**
 
 - **Unit tests:** in `packages/*/test`, mirroring the layer directories (`test/domain/`, `test/handlers/`, …).
-- **Architecture test:** enforces the import rule (section 2.3).
+- **Architecture tests:** enforce the layer rules in core and in the Cloudflare package (section 2.3).
 - **Conformance suites:** one behavioural contract per store interface, shipped from `@tarodomain/core/testing` and run against in-memory and D1 (section 3.3). They guarantee that providers behave identically.
 - **End-to-end tests:** `examples/bank-account/test` exercises the whole framework through `Framework.dispatch()` and `fetchHandler()`.
 - **Spec traceability:** test names cite the § they cover, for example `describe('§13.2 SagaStateMachine')`.
