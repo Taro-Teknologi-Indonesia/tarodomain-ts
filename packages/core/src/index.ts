@@ -1,2 +1,4 @@
-// Implementation pending — see IMPLEMENTATION_PLAN.md at the repository root.
-export {};
+// The full public API of @tarodomain/core. Each layer's barrel lists what it makes public.
+
+export * from './kernel/index.js';
+export * from './domain/index.js';
