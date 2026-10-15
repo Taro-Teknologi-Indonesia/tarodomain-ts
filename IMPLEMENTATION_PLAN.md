@@ -1,6 +1,6 @@
 # TaroDomain TypeScript — Implementation Plan
 
-Source of truth: [`packages/tarodomain-spec/README.md`](packages/tarodomain-spec/README.md), the TaroDomain Design Specification v1.0, pinned at commit `5abefed`. Section numbers (§) below refer to that document.
+Source of truth: [`packages/tarodomain-spec/README.md`](packages/tarodomain-spec/README.md), the TaroDomain Design Specification v1.0, pinned at commit `a9243e3`. Section numbers (§) below refer to that document.
 
 This plan is organised around the spec's Layered Architecture (§1.2) and its dependency rules (§1.3). Every module belongs to exactly one layer, the layers are built in dependency order (the §1.3 diagram, bottom to top), and a test stops imports from crossing layers in the wrong direction.
 
@@ -32,9 +32,9 @@ Each layer in the §1.2 diagram gets one directory in `packages/core/src/`. The 
 | Domain Layer (pure) | `domain/` | `DomainEvent`, `Command`, `ValueObject`, `AggregateId`, `AggregateRoot`, `ExecutionContext` | §2, §5, §28.1 |
 | Persistence Layer (adapters) | `persistence/` | Store contracts, `UnitOfWork` contract, `EventRegistry`, `EventStore`, repositories | §3, §6–9, §11.4, §12.3, §14, §21.1, §28.3 |
 | Platform Layer (provider) | `platform/` | `Provider` interface, in-memory adapters, `LocalProvider` | §7.2, §10.3, §24, §27 |
-| Kernel (cross-cutting) | `kernel/` | Error hierarchy, UUIDv7, backoff, stable hashing, convention lookup, `Clock` and `Logger` | §22, §2.1, §16.2 |
+| Kernel (cross-cutting) | `kernel/` | Error hierarchy, UUIDv7, backoff, context storage, stable hashing, convention lookup, `Clock` and `Logger` | §22, §2.1, §16.2, §5.5 |
 
-The Kernel is the column alongside every other layer in the §1.2 diagram, and the bottom box of the §1.3 dependency diagram. It holds the cross-cutting pieces every layer needs and imports nothing. `Clock`, `Logger`, stable hashing and convention lookup are additions in this implementation; the spec lists only the error hierarchy, UUIDv7 and backoff.
+The Kernel is the column alongside every other layer in the §1.2 diagram, and the bottom box of the §1.3 dependency diagram. It holds the cross-cutting pieces every layer needs and imports nothing. `Clock`, `Logger`, stable hashing and convention lookup are additions in this implementation; the spec lists the error hierarchy, UUIDv7, backoff and context storage.
 
 ```
 packages/core/src/        kernel/ domain/ persistence/ handlers/ dispatch/ platform/ framework/ entry/ testing/
@@ -103,9 +103,11 @@ Two architecture tests enforce the rules: `packages/core/test/architecture.test.
 | Export | Contents | Why it is separate |
 |---|---|---|
 | `.` | The full public API | Default import |
-| `./domain` | The Domain layer, plus the Kernel pieces it uses (errors, UUIDv7) | A user's domain modules import from here, so they can't reach infrastructure by accident |
+| `./domain` | The Domain layer's barrel, `domain/index.ts`, which also re-exports the Kernel errors and UUID helpers | A user's domain modules import from here, so they can't reach infrastructure by accident |
 | `./testing` | Adapter conformance suites | Imports vitest (an optional peer dependency), which keeps the main entry free of runtime dependencies |
 | `./async-context` | `AsyncLocalStorage` context storage (D2) | Imports `node:async_hooks`, which keeps the main entry free of `node:*` imports |
+
+Each subpath points at a barrel: `./domain` at `domain/index.ts`, `./testing` at `testing/index.ts`, `./async-context` at `platform/node/index.ts`.
 
 ## 3. Layer by layer
 
@@ -117,15 +119,16 @@ Cross-cutting building blocks. Imports nothing.
 
 | Component | Notes | Spec |
 |---|---|---|
-| `FrameworkError`, four category bases, all 51 error codes | `retryable` and `httpStatus` derive from the category. `toJSON`, `toHttpResponse`, `toLogEntry`. | §22 |
+| `FrameworkError`, four category bases, all 51 error codes | `retryable` and `httpStatus` derive from the category. Every error takes `(message, { context, cause })`. `toJSON`, `toHttpResponse` (`context` for 4xx only, never the cause), `toLogEntry` (domain errors log as warnings). | §22 |
 | `shouldRetry(error)` | A plain `Error` counts as infrastructure, so it is retryable (D1) | §21.3, §22.1 |
-| UUIDv7 | Monotonic within a millisecond. Uses `crypto.getRandomValues`, available on Node and Workers. | §2.1 |
-| Backoff with jitter | `initialMs * multiplier^attempt`, capped at `maxMs`, ±10% | §11.5, §16.2, §21.3 |
+| UUIDv7 | Monotonic within a millisecond, and when the clock steps back. Uses `crypto.getRandomValues`, available on Node and Workers. | §2.1 |
+| Backoff with jitter | `initialMs * multiplier^attempt`, capped at `maxMs`, then ±10%. Whole milliseconds. | §11.5, §16.2, §21.3 |
+| Context storage | `ContextStorage` with `run`, `get`, `set`. `GlobalContextStorage` is the default: one process-wide stack of scopes. `AmbientContext` holds the installed storage. Holds the `ExecutionContext`, and on D1 the active unit of work (D2). | §5.5 |
 | Stable hash | Gives the same result on every runtime (FNV-1a). Routes shards with `hash(shardKey) % shardCount`. | §12.1 |
 | Convention lookup | `findHandler(target, prefix, eventName)`, shared by aggregates, projections and sagas | §5.2, §12.2, §13.1 |
-| `Clock`, `Logger` ports | Default to `Date.now` and `console`. Tests control time for timeouts, TTL cleanup and backoff. | — |
+| `Clock`, `Logger` ports | Default to `Date` with `setTimeout`, and `console`. `ManualClock` lets tests control time for timeouts, TTL cleanup and backoff. | — |
 
-**Tests:** every error code has the right category, HTTP status and retryability; UUIDv7 stays ordered under bursts; backoff stays within its bounds.
+**Tests:** every error code has the right category, HTTP status and retryability; UUIDv7 stays ordered under bursts; backoff stays within its bounds; context scopes nest, and close after async work and errors.
 
 ### 3.2 Domain — `domain/` (pure)
 
@@ -133,13 +136,17 @@ Everything a user's domain model extends. Imports only Kernel.
 
 | Component | Notes | Spec |
 |---|---|---|
-| `DomainEvent` | Envelope fields, `serialize()`, static `rehydrate()` via `Object.create` and `defineProperty`. `eventName` can be overridden for minified builds. | §2.1 |
-| `SerializedEvent` | The storage shape (`event_id`, `event_type`, …) | §2.1 |
-| `Command` | Same envelope, with `timestamp`. `commandName` is used to deserialize queue messages. | §2.2, §4.3 |
-| `ValueObject<T>` | Structural `equals`, a `hashCode` consistent with it, optional `compareTo`, `validate`, `with` | §2.3 |
-| `AggregateId` | `generate`, `fromExisting`, `fromUuidv7`. The static factories return the subclass type. | §2.4 |
-| `AggregateRoot<TId>` | `raise`/`applyEvent`, `#version`, `#uncommitted`, `committedVersion`, `loadFromHistory`, snapshot hooks, execution-context enrichment | §5 |
-| `ExecutionContext` | `set`/`get`/`clear` over pluggable storage (D2) | §5.5 |
+| `DomainEvent` | Envelope fields with validated UUIDs, `serialize()`, static `rehydrate()` via `Object.create` and `defineProperty`. A class can override `eventName` (for minified builds) and `eventVersion` (default `1.0.0`) with a static; subclasses don't inherit the override. | §2.1 |
+| `SerializedEvent` | The storage shape (`event_id`, `event_type`, …). `data` and `metadata` are JSON values. | §2.1 |
+| `Command` | Same envelope, with `timestamp`. `commandName` is overridable like `eventName`, and finds the class again when deserializing. `serialize()` and `rehydrate()`, through `SerializedCommand`. | §2.2, §4.3 |
+| `ValueObject<T>` | Structural `equals` (same class, deeply equal value), a `hashCode` consistent with it, optional `compareTo`, `validate` (return `false` or throw), `with`. The value is deep-frozen. | §2.3 |
+| `AggregateId` | `generate`, `fromExisting`, `fromUuidv7`. The static factories return the subclass type. Values are lower-cased. | §2.4 |
+| `AggregateRoot<TId>` | `raise`/`applyEvent`, `#version`, `#uncommitted`, `committedVersion`, `loadFromHistory`, snapshot hooks, execution-context enrichment. `aggregateName` is overridable like `eventName`. | §5 |
+| `ExecutionContext` | `set`/`get`/`clear`/`run` over the Kernel's context storage (D2) | §5.5 |
+
+**Execution context.** `raise()` uses the aggregate's own context, which the repository sets on load. Failing that, it uses the ambient `ExecutionContext`, which covers new aggregates created by a static factory.
+
+**Snapshots.** `toSnapshot()` returns JSON-normalised data, the same as any store returns, so in-memory tests catch fields that wouldn't survive D1. `toSnapshotState()` goes under the reserved key `#private`. Dates and value objects in fields need the snapshot hooks.
 
 **A TypeScript caveat.** TypeScript compares classes structurally. `class AccountId extends AggregateId {}` and `class CustomerId extends AggregateId {}` are therefore interchangeable at compile time, which defeats the point of §2.4. Subclasses add a type-only brand (`declare private readonly _brand: 'AccountId'`), which emits no runtime code. The docs and the example both use this pattern.
 
@@ -242,7 +249,7 @@ Assembles the layers into a running application.
 | `TaroDomain.builder()` | `.useProvider()`, `.useLocal()`, `.consistency()`, `.snapshotEvery()`, `.aggregate()`, `.command()`, `.projection()`, `.saga()`, `.events()`, `.validation()`, `.skipValidation()`, `.build()` | §25.1 |
 | Assembly | Two event buses, two repositories per aggregate and two pipelines. Repository mode (`event_sourced` or `state`) is set per aggregate. | §11.3, §15.3, §15.4 |
 | `Framework` | `dispatch`, `fetchHandler`, `queueHandler`, `scheduledHandler`, `getConsistencyFor`, service accessors | §25.2 |
-| Runtime handlers | `fetchHandler()`: the HTTP router (D11), with errors turned into responses by `FrameworkError.toHttpResponse()`. `queueHandler()`: runs over `QueueMessage`. `scheduledHandler()`: cron catch-up, then saga timeouts, within the backpressure budget. | §25.2, §26.1 |
+| Runtime handlers | `fetchHandler()`: the HTTP router (D11), with errors turned into responses by `FrameworkError.toHttpResponse()`, which keeps server-side details out of 5xx responses. `queueHandler()`: runs over `QueueMessage`. `scheduledHandler()`: cron catch-up, then saga timeouts, within the backpressure budget. | §25.2, §26.1 |
 | `FrameworkValidator` | Runs inside `build()`. Errors throw one `InvalidConfigurationError` that lists every issue; warnings go to the `Logger`. | §29.1 |
 
 The runtime handlers live here, not in Entry, because `Framework` exposes them (§25.2) and Entry depends on Framework, never the reverse (§1.3). Entry only adapts a platform's triggers to them.
@@ -301,11 +308,13 @@ Milestones follow the import order, left to right. Each ends with green `pnpm ty
 ### M0 — Scaffolding ✅
 pnpm 10 workspaces, TypeScript 7 (strict, `NodeNext`, ESM only), vitest 5, the `source` export condition, the spec submodule, npm publish metadata, Changesets, CI (typecheck, test and build on Node 22 and 24), a manual-only release workflow, and placeholder READMEs. Also the layer guardrails from section 2.3: both architecture tests, `tools/architecture.ts` and `CLAUDE.md`.
 
-### M1 — Kernel and Domain
+### M1 — Kernel and Domain ✅
 - Everything in sections 3.1 and 3.2.
 - The `./domain` export.
 
 **Exit:** unit tests for every primitive. The architecture test passes.
+
+**Done:** 183 tests, and the architecture tests pass. D1–D3 are settled (section 6). Context storage moved from Domain to Kernel, so the unit of work can share it without depending on a Domain class. The spec now records the Domain and Kernel behaviour this milestone settled.
 
 ### M2 — Persistence, with local stores
 - Everything in section 3.3.
@@ -348,13 +357,13 @@ pnpm 10 workspaces, TypeScript 7 (strict, `NodeNext`, ESM only), vitest 5, the `
 
 ## 6. Open decisions
 
-Each item has a recommendation and the milestone that needs it settled. They are ordered by layer, left to right.
+Each item has a recommendation and the milestone that needs it settled, or the decision once it is settled. They are ordered by layer, left to right.
 
 | # | Layer | Topic | Issue | Recommendation | Needed by |
 |---|---|---|---|---|---|
-| D1 | Kernel | **Unknown (non-framework) errors** | Should `shouldRetry` treat a plain `Error` as retryable? | Yes, treat it as infrastructure. Otherwise a network blip gets dead-lettered or skipped instead of retried. | M1 |
-| D2 | Domain, Platform | **ExecutionContext is module-level** (§5.5) | The spec itself notes it is unsafe under concurrent requests. | Use pluggable storage. Keep the module-level default in Domain, and offer `AsyncLocalStorage` through `./async-context` (works on Node, and on Workers with `nodejs_compat`). The same storage holds the active D1 unit of work. | M1 |
-| D3 | Domain | **Freezing events** (§2.1) | Business fields are subclass constructor parameters, so they get assigned after the base constructor runs. The base class cannot freeze the event. | Mark fields `readonly` in the types, and freeze at the framework boundary (`raise`, `rehydrate`, `publish`). | M1 |
+| D1 | Kernel | **Unknown (non-framework) errors** | Should `shouldRetry` treat a plain `Error` as retryable? | ✅ **Decided (M1):** yes, it counts as infrastructure. Otherwise a network blip gets dead-lettered or skipped instead of retried. | M1 |
+| D2 | Kernel, Domain, Platform | **ExecutionContext is module-level** (§5.5) | The spec itself noted it is unsafe under concurrent requests. | ✅ **Decided (M1):** pluggable storage in the Kernel (`ContextStorage`, held by `AmbientContext`), not in Domain, so the D1 unit of work can share it. The default is one process-wide stack of scopes; `run()` scopes nest, so a nested dispatch leaves the outer context intact. `AsyncLocalStorage` comes through `./async-context` in M6 (works on Node, and on Workers with `nodejs_compat`). The same storage will hold the active D1 unit of work. | M1 |
+| D3 | Domain | **Freezing events** (§2.1) | Business fields are subclass constructor parameters, so they get assigned after the base constructor runs. The base class cannot freeze the event. | ✅ **Decided (M1):** fields are `readonly` in the types, and events are deep-frozen at the framework boundary: `raise` and `rehydrate` now, `publish` in M4. | M1 |
 | D4 | Handlers, Framework | **`CommandHandler.aggregateType`** (§4.1) | It is an abstract *instance* property, but the builder needs it *before* constructing the handler, to choose the right repository. | Make it a `static aggregateType` on the handler class, or accept `{ aggregate }` in `.command(...)`. | M3 |
 | D5 | Handlers | **Event arriving at a completed saga** (§13.1 step 1) | The spec throws `SagaAlreadyCompletedError`. In strong mode that rolls back the entire command, for example when a late event in the same correlation chain arrives. | `ProcessManager.handle` throws as specified. `SagaEventHandler` logs and skips. | M3 |
 | D6 | Dispatch | **Nested dispatch in strong mode** | A saga dispatching a command starts a pipeline inside an active `UnitOfWork`. | Nested pipelines join the outer transaction, with no nested begin/commit or retry. The outer retry covers everything. | M4 |
