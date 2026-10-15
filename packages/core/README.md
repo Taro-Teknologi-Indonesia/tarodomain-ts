@@ -7,7 +7,6 @@ Core of the [TaroDomain framework](https://github.com/Taro-Teknologi-Indonesia/t
 Platform-agnostic, with zero runtime dependencies. Includes in-memory adapters and a `LocalProvider` for development and tests. For production persistence, add a provider package:
 
 - [`@tarodomain/cloudflare`](https://www.npmjs.com/package/@tarodomain/cloudflare): D1, Queues, Workers
-- [`@tarodomain/aws`](https://www.npmjs.com/package/@tarodomain/aws): DynamoDB, SQS, Lambda
 
 ```sh
 npm install @tarodomain/core

@@ -1,6 +1,6 @@
 # tarodomain-ts
 
-TypeScript implementation of the [TaroDomain framework](https://github.com/Taro-Teknologi-Indonesia/tarodomain): event sourcing, CQRS and DDD with strong and eventual consistency, on Cloudflare, AWS or locally.
+TypeScript implementation of the [TaroDomain framework](https://github.com/Taro-Teknologi-Indonesia/tarodomain): event sourcing, CQRS and DDD with strong and eventual consistency, on Cloudflare or locally.
 
 > Status: scaffolding. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the roadmap.
 
@@ -10,7 +10,6 @@ TypeScript implementation of the [TaroDomain framework](https://github.com/Taro-
 |---|---|---|
 | `packages/core` | `@tarodomain/core` | Platform-agnostic framework, in-memory adapters, `LocalProvider` |
 | `packages/cloudflare` | `@tarodomain/cloudflare` | D1 adapters, Queues event bus, Worker entry point |
-| `packages/aws` | `@tarodomain/aws` | DynamoDB adapters, SQS event bus, Lambda entry points |
 | `packages/tarodomain-spec` | — | Design spec (git submodule, not a workspace package) |
 | `examples/bank-account` | — | Reference application |
 
