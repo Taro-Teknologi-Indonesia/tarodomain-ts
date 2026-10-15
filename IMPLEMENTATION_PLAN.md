@@ -1,6 +1,6 @@
 # TaroDomain TypeScript — Implementation Plan
 
-Source of truth: [`packages/tarodomain-spec/README.md`](packages/tarodomain-spec/README.md), the TaroDomain Design Specification v1.0, pinned at commit `ce4394a`. Section numbers (§) below refer to that document.
+Source of truth: [`packages/tarodomain-spec/README.md`](packages/tarodomain-spec/README.md), the TaroDomain Design Specification v1.0, pinned at commit `5abefed`. Section numbers (§) below refer to that document.
 
 This plan is organised around the spec's Layered Architecture (§1.2). Every module belongs to exactly one layer, the layers are built bottom-up, and a test stops imports from crossing layers in the wrong direction.
 
@@ -32,9 +32,9 @@ Each layer in the §1.2 diagram gets one directory in `packages/core/src/`. The 
 | Domain Layer (pure) | `domain/` | `DomainEvent`, `Command`, `ValueObject`, `AggregateId`, `AggregateRoot`, `ExecutionContext` | §2, §5, §28.1 |
 | Persistence Layer (adapters) | `persistence/` | Store contracts, `UnitOfWork` contract, `EventRegistry`, `EventStore`, repositories | §3, §6–9, §11.4, §12.3, §14, §21.1, §28.3 |
 | Platform Layer (provider) | `platform/` | `Provider` interface, in-memory adapters, `LocalProvider` | §7.2, §10.3, §24, §27 |
-| *Kernel (implicit)* | `kernel/` | Error hierarchy, UUIDv7, backoff, stable hashing, convention lookup, `Clock` and `Logger` | §22, §2.1, §16.2 |
+| Kernel (cross-cutting) | `kernel/` | Error hierarchy, UUIDv7, backoff, stable hashing, convention lookup, `Clock` and `Logger` | §22, §2.1, §16.2 |
 
-The diagram leaves the Kernel implicit. It holds the cross-cutting pieces every layer needs and imports nothing.
+The Kernel is the column that runs alongside every other layer in the diagram. It holds the cross-cutting pieces every layer needs and imports nothing. `Clock`, `Logger`, stable hashing and convention lookup are additions in this implementation; the spec lists only the error hierarchy, UUIDv7 and backoff.
 
 ```
 packages/core/src/        kernel/ domain/ persistence/ handlers/ dispatch/ platform/ framework/ entry/ testing/
@@ -45,16 +45,16 @@ packages/cloudflare/src/  platform/ entry/
 
 ### 2.2 Import rule
 
-The diagram shows the **call path**: a request enters at the top and reaches the database at the bottom. It can't also be the **import graph**. Read that way, the Domain layer would import Persistence and the Platform, and the spec requires domain code free of infrastructure (§1.1). So the code uses dependency inversion:
+The diagram shows the **call path**: a request enters at the top and reaches the database at the bottom. It can't also be the **import graph**. Read that way, the Domain layer would import Persistence and the Platform, and the spec requires domain code free of infrastructure (§1.1). The spec's dependency diagram (§1.3) sets out the rules. In this implementation they work out as follows:
 
 - Each contract **lives in the layer where the spec defines it**. Persistence has `EventStoreAdapter`, the other store contracts and `UnitOfWork`. Handlers have `CommandDispatcher`. Dispatch has `EventBus`, `EventHandler` and the `QueueMessage` port.
 - The **Platform layer implements** those contracts. It sits at the bottom of the call path but near the top of the import order, because it plugs implementations into contracts that other layers define.
 - Only the **Framework** picks a platform, through the `Provider` interface.
 
-That gives one linear import order. A module may import from its own layer or from any layer to its left:
+That gives one linear import order, the §1.3 diagram read bottom to top. A module may import from its own layer or from any layer to its left. As in §1.3, arrows point at the dependency:
 
 ```
-kernel → domain → persistence → handlers → dispatch → platform → framework → entry
+kernel ◀─ domain ◀─ persistence ◀─ handlers ◀─ dispatch ◀─ platform ◀─ framework ◀─ entry
 ```
 
 One exception keeps the Event Bus contracts in the Event Bus layer, where §1.2 and §10 put them. Two layers to its left need them. `Repository.save()` publishes right after appending (§6.2 step 4), and `CommandHandler` receives the bus (§4.1). Projections and saga handlers implement `EventHandler` (§12.1, §13.3). So a module may also import another layer's **contract module** (`contracts.ts`), wherever that layer sits, provided that:
@@ -64,7 +64,7 @@ One exception keeps the Event Bus contracts in the Event Bus layer, where §1.2 
 
 Today only `dispatch/bus/contracts.ts` (`EventBus`, `EventHandler`) needs this.
 
-`UnitOfWork` (§11.4) lives in Persistence, even though the spec describes it with the Command Pipeline, because it is the transaction boundary over the stores. The pipelines call it and the Platform implements it. Both sit to the right of Persistence, so it needs no exception.
+`UnitOfWork` (§11.4) lives in Persistence, as the transaction boundary over the stores. The pipelines call it and the Platform implements it. Both sit to the right of Persistence, so it needs no exception.
 
 `SerializedEvent` lives in Domain, because `DomainEvent.serialize()` and `rehydrate()` produce and consume it (§2.1). It is plain data, with no I/O.
 
